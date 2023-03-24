@@ -32,24 +32,25 @@ int rrand(int max) {
 	return rand() % max;
 }
 
-float fsqrt(float n) {
-
-	const float threehalfs = 1.5F;
-	float y = n;
-
-	long i = *(long*)&y;
-
-	i = 0x5f3759df - (i >> 1);
-	y = *(float*)&i;
-
-	y = y * (threehalfs - ((n * 0.5F) * y * y));
-
-	return 1 / y;
+double approx(double v,double k) {
+	return (ceilf(v * k) / k);
 }
+
+double fsqrt(double v,double precision) {
+	for(double k = v/50; k < v; k += 1 / precision) {
+		if(approx(k * k,precision) >= approx(v,precision)) {
+			// found value
+			return k;
+		}
+
+	}
+}
+
+double precision_sqrt = 5;
 
 double dsqrt(double k) {
 	if(fast_square_root) {
-		return fsqrt(k);
+		return fsqrt(k,precision_sqrt);
 	}
 	else {
 		return sqrt(k);
@@ -64,6 +65,9 @@ struct vec2 {
 	double x,y;
 	vec2 operator+(vec2 obj) {
 		return {x + obj.x,y + obj.y};
+	}
+	vec2 operator-(vec2 obj) {
+		return {x - obj.x,y - obj.y};
 	}
 	double distance(vec2 p) {
 		return dsqrt(pow(p.x - x,2) + pow(p.y - y,2));
@@ -107,38 +111,85 @@ vector<obj*> scene;
 
 int frames = 0;
 
+class light {
+public:
+	vec2 position;
+	float max_length;
+	light(vec2 position,float max_length):position(position),max_length(max_length) {}
+	double visible(vec2 from,double step) {
+		if(from.x == position.x && from.y == position.y) {
+			return 1;
+		}
+		double d1 = from.distance(position);
+		vec2 step_f = {((from.x - position.x) / d1)*step,((from.y - position.y) / d1)*step};
+		vec2 step_pos = position;
+		double d_f = 0;
+		if(d1 >= max_length) {
+			return 0;
+		}
+		while(1) {
+			d_f = step_pos.distance(position) - step;
+			step_pos = step_pos + step_f;
+			if(d_f >= d1 || d_f >= max_length) {
+				// out of range
+				double normalized = map(d_f,max_length,1);
+				if(normalized >= 1) {
+					normalized = 1;
+				}
+				return abs(normalized-1 );
+			}
+			for(int i = 0; i < scene.size(); i++) {
+				if(scene[i]->cast(step_pos)) {
+					// intersect with an object
+					return 0;
+				}
+			}
+		}
+	}
+};
+
 class camera {
 private:
-	int steps_max;
-	int steps_max_fixed;
 public:
 	vec2 center;
 	double angle;
 	double fov;
-	double rays_max;
+	int rays_max;
 	double renderdistance;
 	double step;
-	bool map_dist = false;
+	double height = 0;
+	bool map_dist = true;
 	bool rendering = false;
+	bool cast_lights = true;
+	double light_casting_step = 1;
 	double percentage = 0;
-	camera(vec2 ncenter,double angle,double fov,double rays_max,double renderdistance,double nstep,bool flat_surf = true):center(ncenter),angle(angle),fov(fov),rays_max(rays_max),renderdistance(renderdistance),step(nstep) {
-		steps_max = (int)ceil(renderdistance/step);
+	light* light_1;
+	camera(vec2 ncenter,double angle,double fov,double rays_max,double renderdistance,double nstep,double nstep_light,light* light,bool flat_surf = true):center(ncenter),angle(angle),fov(fov),rays_max(rays_max),renderdistance(renderdistance),step(nstep),light_casting_step(nstep_light),light_1(light) {
+		//steps_max = (int)ceil(renderdistance/step);
 	}
-	void render(bool& round_rays) {
+	void render(bool& round_rays,bool debug = false) {
+		if(debug) {
+			for(int i = 0; i < scene.size(); i++) {
+				scene[i]->draw();
+			}
+		}
 		rendering = true;
 		if(fov > 135) {
 			round_rays = true;
 		}
 		double max_dist = 0;
 		for(double x = angle - fov / 2; x < angle + fov / 2; x += fov / rays_max) {
+			int steps = 0;
 			bool intersected = false;
 			vec2 step_pos = center;
-			if(!round_rays) {
-				//max_dist = dsqrt(pow(renderdistance,2) + pow(renderdistance * tan(rad(x - angle)),2));
-				steps_max_fixed = (int)ceilf(dsqrt(pow(renderdistance,2) + pow(renderdistance * tan(rad(x - angle)),2))/step);
+			{
+				max_dist = dsqrt(pow(renderdistance,2) + pow(renderdistance * tan(rad(x - angle)),2));
+				//steps_max_fixed = (int)ceilf(dsqrt(pow(renderdistance,2) + pow(renderdistance * tan(rad(x - angle)),2))/step;
 			}
+			double dx = sin(rad(x))*step;
+			double dy = cos(rad(x))*step;
 			while(!intersected) {
-				step_pos = step_pos + vec2{sin(rad(x))*step,cos(rad(x))*step};
+				step_pos = step_pos + vec2{dx,dy};
 				double dist = step_pos.distance(center);
 				if(dist >= (round_rays?renderdistance:max_dist)) {
 					intersected = true;
@@ -150,48 +201,30 @@ public:
 						intersected = true;
 
 						double norm = abs(map(dist,map_dist?max_dist:renderdistance,1)-1);
+						double norm_light = 1;
+						if(cast_lights) {
+							norm_light = light_1->visible(step_pos - vec2{dx*10,dy*10},light_casting_step);
+						}
 						double h = H*norm;
-						Uint8 alpha = 255*norm;
+						Uint8 alpha = (255*(cast_lights?norm_light:norm));
 						double X = map(x - angle + fov / 2,fov,W);
 
 						SDL_Color* c = &scene[i]->c;
-						SDL_SetRenderDrawColor(renderer,c->r,c->g,c->b,alpha);
-						SDL_RenderDrawLineF(renderer,X,H / 2 + h / 2,X,H / 2 - h / 2);
+						double mid = H / 2 + height;
+						if(!debug) {
+							SDL_SetRenderDrawColor(renderer,c->r,c->g,c->b,alpha);
+							SDL_RenderDrawLineF(renderer,X,mid + h / 2,X,mid - h / 2);
+						}
 						break;
 					}
 				}
+				if(debug) {
+					SDL_SetRenderDrawColor(renderer,255,255,255,255);
+					SDL_RenderDrawPoint(renderer,step_pos.x,step_pos.y);
+				}
 			}
-			percentage = map(x - angle + fov / 2,fov,100);
 		}
-		percentage = 0.0;
 		rendering = false;
-	}
-	void debug(bool round_rays = false) {
-		for(int j = 0; j < scene.size(); j++) {
-			scene[j]->draw();
-		}
-		SDL_SetRenderDrawColor(renderer,255,255,255,255);
-		double max_dist = 0;
-		for(double x = angle - fov / 2; x < angle + fov / 2; x += fov / rays_max) {
-			bool intersected = false;
-			vec2 step_pos = center;
-			max_dist = dsqrt(pow(renderdistance,2) + pow(renderdistance * tan(rad(x - angle)),2));
-			while(!intersected) {
-				step_pos = step_pos + vec2{sin(rad(x)) * step,cos(rad(x)) * step};
-				if(step_pos.distance(center) >= (round_rays ? renderdistance : max_dist)) {
-					intersected = true;
-					break;
-				}
-				for(int i = 0; i < scene.size(); i++) {
-					if(scene[i]->cast(step_pos))
-					{
-						intersected = true;
-						break;
-					}
-				}
-				SDL_RenderDrawPoint(renderer,step_pos.x,step_pos.y);
-			}
-		}
 	}
 };
 
@@ -210,15 +243,29 @@ void stats(camera* c) {
 	}
 }
 
+void create_cube(vec2 center,double size) {
+	double s = size / 2;
+	scene.push_back(new obj({center.x - s,center.y},{5,size},{255,0,0,255},OBJ_QUAD));
+	scene.push_back(new obj({center.x + s,center.y},{5,size},{255,0,0,255},OBJ_QUAD));
+	scene.push_back(new obj({center.x,center.y-s},{size,5},{255,0,0,255},OBJ_QUAD));
+	scene.push_back(new obj({center.x,center.y+s},{size,5},{255,0,0,255},OBJ_QUAD));
+}
+
 int main() {
-	W = 512;
-	H = 512;
+	srand(time(0));
+	W = 1920;
+	H = 1080;
 	SDL_Init(SDL_INIT_EVERYTHING);
 	SDL_CreateWindowAndRenderer(W,H,SDL_WINDOW_RESIZABLE,&window,&renderer);
 
-	camera cam({W/2,H/2},90,60,W,100,.5,true);
-	
-	thread t1(&stats,&cam);
+	light l1({1920 / 2,1080 / 2},100);
+
+
+	camera cam({W/2-100,H/2},90,70,W*2,300,.5,.5,&l1,true);
+
+	fast_square_root = false;
+
+	//thread t1(&stats,&cam);
 
 	scene.push_back(new obj({W / 2 + 60,H / 2 - 60},{30,30},{0,0,0,255},OBJ_QUAD));
 	scene.push_back(new obj({W / 2 + 60,H / 2},{30,30},{0,0,0,255},OBJ_QUAD));
@@ -227,13 +274,11 @@ int main() {
 	scene.push_back(new obj({W / 2 + 30,H / 2 - 30},{30,30},{0,0,0,255},OBJ_QUAD));
 	scene.push_back(new obj({W / 2 + 30,H / 2 + 30},{30,30},{0,0,0,255},OBJ_QUAD));
 
-	scene[0]->c = {255,0,0,255};
-	scene[1]->c = {0,255,0,255};
-	scene[2]->c = {0,0,255,255};
-
-	scene[3]->c = {0,0,255,255};
-	scene[4]->c = {255,0,0,255};
+	create_cube({1920 / 2,1080 / 2},300);
 	
+	for(int i = 0; i < scene.size(); i++) {
+		scene[i]->c = {(Uint8)random(255,0),(Uint8)random(255,0),(Uint8)random(255,0),255};
+	}
 
 	/*for(int i = 0; i < 100; i++) {
 		scene.push_back(new obj{{}});
@@ -260,6 +305,7 @@ int main() {
 
 	while(1) {
 		SDL_SetRenderDrawBlendMode(renderer,shadowing_alpha ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+		
 		ImGuiIO& io = ImGui::GetIO();
 		SDL_SetRenderDrawColor(renderer,0,0,0,255);
 		SDL_RenderClear(renderer);
@@ -286,6 +332,8 @@ int main() {
 					cam.rays_max = W;
 				}
 			}
+
+
 			else if(e.type == SDL_MOUSEWHEEL)
 			{
 				wheel = e.wheel.y;
@@ -304,31 +352,25 @@ int main() {
 			else if(e.key.keysym.scancode == SDL_SCANCODE_A) {
 				cam.angle--;
 			}
+			else if(e.key.keysym.scancode == SDL_SCANCODE_UP) {
+				l1.position.x++;
+			}
+			else if(e.key.keysym.scancode == SDL_SCANCODE_DOWN) {
+				l1.position.x--;
+			}
+			else if(e.key.keysym.scancode == SDL_SCANCODE_LEFT) {
+				l1.position.y++;
+			}
+			else if(e.key.keysym.scancode == SDL_SCANCODE_RIGHT) {
+				l1.position.y--;
+			}
 			if(e.type == SDL_KEYDOWN) {
 				if(e.key.keysym.scancode == SDL_SCANCODE_E) {
 					show_mode = !show_mode;
 				}
-				if(e.key.keysym.scancode == SDL_SCANCODE_Q) {
-					r_convert_scene = true;
-				}
-				if(e.key.keysym.scancode == SDL_SCANCODE_R) {
-					round_rays = !round_rays;
-				}
-				if(e.key.keysym.scancode == SDL_SCANCODE_G) {
-					fast_square_root = !fast_square_root;
-				}
 			}
 			if(e.type == SDL_MOUSEWHEEL) {
 				cam.step += e.wheel.preciseY / 50;
-			}
-			if(!show_mode) {
-				if(e.type == SDL_MOUSEBUTTONDOWN) {
-					if(buttons == SDL_BUTTON_LEFT) {
-						int i = scene.size();
-						scene.push_back(new obj({(double)x,(double)y},{30,30},{},OBJ_QUAD));
-						scene[i]->c = {(Uint8)rrand(255),(Uint8)rrand(255),(Uint8)rrand(255),255};
-					}
-				}
 			}
 		}
 	
@@ -345,12 +387,17 @@ int main() {
 		io.MouseWheel = static_cast<float>(wheel);
 		ImGui::NewFrame();
 
-		ImGui::Begin("Values");
+		ImGui::Begin("values");
 		ImGui::InputDouble("fov",&cam.fov,1,2);
-		ImGui::InputDouble("rays",&cam.rays_max,1,2);
+		ImGui::SliderInt("rays",&cam.rays_max,1,W*10);
 		ImGui::InputDouble("step",&cam.step,0.01,0.1);
+		if(cam.cast_lights) {
+			ImGui::InputDouble("light step",&cam.light_casting_step,0.01,0.1);
+			ImGui::SliderFloat("light brightness",&l1.max_length,1,500);
+		}
 		ImGui::InputDouble("render distance",&cam.renderdistance,1,2);
 		ImGui::Checkbox("blend shadow",&shadowing_alpha);
+		ImGui::Checkbox("cast light",&cam.cast_lights);
 		ImGui::Checkbox("use fast square root",&fast_square_root);
 		ImGui::Checkbox("round rays",&round_rays);
 		ImGui::Checkbox("map method (distance)",&cam.map_dist);
@@ -361,12 +408,16 @@ int main() {
 			cam.render(round_rays);
 		}
 		else {
-			cam.debug(round_rays);
+			//cout << l1.visible({(double)x,(double)y},0.1) << endl;
+			//SDL_RenderDrawLineF(renderer,l1.position.x,l1.position.y,x,y);
+			cam.render(round_rays,true);
+			SDL_SetRenderDrawColor(renderer,0,255,0,255);
+			SDL_RenderDrawPoint(renderer,l1.position.x,l1.position.y);
 		}
 
 		ImGui::Render();
 		ImGuiSDL::Render(ImGui::GetDrawData());
 		SDL_RenderPresent(renderer);
 	}
-	t1.join();
+	//t1.join();
 }
